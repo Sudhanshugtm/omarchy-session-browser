@@ -325,6 +325,66 @@ class ScannerTests(unittest.TestCase):
                          "Main Grok task")
         self.assertIn("grok-code-fast-1", rows[0]["meta"])
 
+    def test_pi_reads_list_part_user_message_titles(self):
+        # Pi transcripts store message content as a list of parts, e.g.
+        # [{"type": "text", "text": "..."}]; titles must come from the first
+        # usable user text part, not fall back to the filename.
+        root = Path(".pi/agent/sessions/--tmp-project--")
+        main = self.write_jsonl(
+            root / "main.jsonl",
+            [
+                {"type": "session", "id": "main", "cwd": str(self.home)},
+                {"type": "model_change", "provider": "anthropic", "modelId": "x"},
+                {
+                    "type": "message",
+                    "message": {"role": "user", "content": [
+                        {"type": "text", "text": "List part task"},
+                    ]},
+                },
+            ],
+        )
+        mixed = self.write_jsonl(
+            root / "mixed.jsonl",
+            [
+                {"type": "session", "id": "mixed", "cwd": str(self.home)},
+                {
+                    "type": "message",
+                    "message": {"role": "user", "content": [
+                        {"type": "toolCall", "name": "bash", "arguments": {}},
+                        {"type": "text", "text": "<not usable>"},
+                        {"type": "text", "text": "Mixed part task"},
+                    ]},
+                },
+            ],
+        )
+        empty = self.write_jsonl(
+            root / "empty.jsonl",
+            [
+                {"type": "session", "id": "empty", "cwd": str(self.home)},
+                {"type": "message", "message": {"role": "user", "content": []}},
+            ],
+        )
+        child = self.write_jsonl(
+            root / "child.jsonl",
+            [
+                {"type": "session", "id": "child", "kind": "subagent"},
+                {
+                    "type": "message",
+                    "message": {"role": "user", "content": [
+                        {"type": "text", "text": "Child"},
+                    ]},
+                },
+            ],
+        )
+
+        rows = {Path(row["id"]).name: row for row in SESSIONS.scan_pi()}
+
+        self.assertEqual(set(rows), {main.name, mixed.name, empty.name})
+        self.assertEqual(rows[main.name]["title"], "List part task")
+        self.assertEqual(rows[mixed.name]["title"], "Mixed part task")
+        # No usable text: fall back to the file name, as before.
+        self.assertEqual(rows[empty.name]["title"], empty.name)
+
     def test_resume_targets_the_selected_sessions(self):
         old_find = SESSIONS.find
         old_open_terminal = SESSIONS.open_terminal
