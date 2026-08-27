@@ -749,6 +749,14 @@ def scan_pi(budget=None):
                 if isinstance(content, str) and usable_text(content):
                     title = content
                     break
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text" \
+                                and usable_text(part.get("text", "")):
+                            title = part["text"]
+                            break
+                    if title:
+                        break
         if not header or marked_subagent(header):
             continue
         yield {"agent": "pi", "id": path, "title": title or os.path.basename(path),
