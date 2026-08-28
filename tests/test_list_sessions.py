@@ -588,6 +588,377 @@ class ScannerTests(unittest.TestCase):
         self.assertNotIn("\x1b]0;", rendered)
         self.assertNotIn("\x1b]52;", rendered)
 
+    def test_token_labels_use_compact_units(self):
+        self.assertEqual(SESSIONS.fmt_tokens(0), "")
+        self.assertEqual(SESSIONS.fmt_tokens(512), "512 tok")
+        self.assertEqual(SESSIONS.fmt_tokens(1200), "1.2k tok")
+        self.assertEqual(SESSIONS.fmt_tokens(428000), "428k tok")
+        self.assertEqual(SESSIONS.fmt_tokens(1077398), "1.1M tok")
+        self.assertEqual(SESSIONS.fmt_tokens(1200, truncated=True), "1.2k tok+")
+
+    def test_claude_sums_per_turn_usage(self):
+        session_id = "abababab-abab-4bab-8bab-abababababab"
+        self.write_jsonl(
+            Path(".claude/projects/-tmp-project") / f"{session_id}.jsonl",
+            [
+                {
+                    "type": "user",
+                    "cwd": str(self.home / "project"),
+                    "message": {"content": "Count tokens"},
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": "one",
+                        "usage": {
+                            "input_tokens": 10,
+                            "cache_creation_input_tokens": 20,
+                            "cache_read_input_tokens": 30,
+                            "output_tokens": 40,
+                        },
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": "two",
+                        "usage": {"input_tokens": 5, "output_tokens": 15},
+                    },
+                },
+            ],
+        )
+
+        rows = list(SESSIONS.scan_claude())
+        SESSIONS.enrich(rows[0], SESSIONS.ScanBudget(seconds=1))
+        self.assertEqual(rows[0]["tokens"], 120)
+        self.assertEqual(rows[0]["tokensLabel"], "120 tok")
+        self.assertTrue(rows[0]["meta"].startswith("120 tok"))
+
+    def test_codex_uses_last_cumulative_token_count(self):
+        session_id = "cdcdecdc-cdcd-4cdc-8cdc-cdcdecdcdecd"
+        self.write_jsonl(
+            Path(".codex/sessions/2026/08/27")
+            / f"rollout-2026-08-27T11-00-00-{session_id}.jsonl",
+            [
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": session_id,
+                        "cwd": str(self.home / "project"),
+                        "source": "cli",
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "Ship it"},
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 80,
+                                "output_tokens": 20,
+                                "total_tokens": 100,
+                            },
+                        },
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 400,
+                                "output_tokens": 100,
+                                "total_tokens": 500,
+                            },
+                        },
+                    },
+                },
+            ],
+        )
+
+        rows = list(SESSIONS.scan_codex())
+        SESSIONS.enrich(rows[0], SESSIONS.ScanBudget(seconds=1))
+        self.assertEqual(rows[0]["tokens"], 500)
+        self.assertEqual(rows[0]["tokensLabel"], "500 tok")
+
+    def test_grok_reads_last_turn_completed_usage(self):
+        session_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        sessions = Path(".grok/sessions/%2Ftmp%2Fproject")
+        self.write_json(
+            sessions / session_id / "summary.json",
+            {
+                "info": {"id": session_id, "cwd": str(self.home / "project")},
+                "generated_title": "Grok tokens",
+                "created_at": "2026-08-27T10:00:00Z",
+                "updated_at": "2026-08-27T10:05:00Z",
+                "num_chat_messages": 4,
+                "current_model_id": "grok-4.6",
+            },
+        )
+        self.write_jsonl(
+            sessions / session_id / "updates.jsonl",
+            [
+                {
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "turn_completed",
+                            "usage": {
+                                "inputTokens": 100,
+                                "outputTokens": 20,
+                                "totalTokens": 120,
+                                "costUsdTicks": 0,
+                            },
+                        },
+                    },
+                },
+                {
+                    "method": "_x.ai/session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "turn_completed",
+                            "usage": {
+                                "inputTokens": 1000,
+                                "outputTokens": 200,
+                                "totalTokens": 1200,
+                                "cachedReadTokens": 800,
+                                "reasoningTokens": 50,
+                                "costUsdTicks": 1800000000,
+                            },
+                        },
+                    },
+                },
+            ],
+        )
+
+        with mock.patch.dict(os.environ, {"GROK_HOME": str(self.home / ".grok")}):
+            rows = list(SESSIONS.scan_grok())
+            SESSIONS.enrich(rows[0], SESSIONS.ScanBudget(seconds=1))
+
+        self.assertEqual(rows[0]["tokens"], 1200)
+        self.assertEqual(rows[0]["tokensLabel"], "1.2k tok")
+        self.assertEqual(rows[0]["costLabel"], "$0.18")
+        self.assertIn("1.2k tok", rows[0]["meta"])
+        self.assertIn("$0.18", rows[0]["meta"])
+
+    def test_grok_usage_reads_from_eof_past_noise_and_size_cap(self):
+        session_id = "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f"
+        sessions = Path(".grok/sessions/%2Ftmp%2Fproject")
+        self.write_json(
+            sessions / session_id / "summary.json",
+            {
+                "info": {"id": session_id, "cwd": str(self.home / "project")},
+                "generated_title": "Large Grok log",
+                "created_at": "2026-08-27T10:00:00Z",
+                "updated_at": "2026-08-27T10:05:00Z",
+            },
+        )
+        path = self.home / sessions / session_id / "updates.jsonl"
+        records = [
+            {
+                "params": {
+                    "update": {
+                        "sessionUpdate": "turn_completed",
+                        "usage": {"totalTokens": 10},
+                    },
+                },
+            },
+        ]
+        records.append({
+            "params": {
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "rawInput": 'mentions turn_completed and "sessionUpdate": "turn_completed"',
+                },
+            },
+        })
+        padding = {"params": {"update": {"sessionUpdate": "agent_thought_chunk",
+                                         "content": {"text": "n" * 200}}}}
+        records.extend([padding] * 40)
+        records.append({
+            "params": {
+                "update": {
+                    "sessionUpdate": "turn_completed",
+                    "usage": {"totalTokens": 12000, "costUsdTicks": 200000000},
+                },
+            },
+        })
+        records.append({
+            "params": {
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "title": "run_terminal_command",
+                    "rawInput": "echo turn_completed",
+                },
+            },
+        })
+        self.write_jsonl(sessions / session_id / "updates.jsonl", records)
+        self.assertGreater(path.stat().st_size, 2048)
+
+        with mock.patch.object(SESSIONS, "METADATA_FILE_MAX", 2048), \
+                mock.patch.dict(os.environ, {"GROK_HOME": str(self.home / ".grok")}):
+            rows = list(SESSIONS.scan_grok())
+            SESSIONS.enrich(rows[0], SESSIONS.ScanBudget(seconds=1))
+
+        self.assertEqual(rows[0]["tokens"], 12000)
+        self.assertEqual(rows[0]["tokensLabel"], "12k tok")
+
+    def test_grok_falls_back_to_latest_context_when_turn_still_open(self):
+        session_id = "1a1a1a1a-1a1a-41a1-81a1-1a1a1a1a1a1a"
+        sessions = Path(".grok/sessions/%2Ftmp%2Fproject")
+        self.write_json(
+            sessions / session_id / "summary.json",
+            {
+                "info": {"id": session_id, "cwd": str(self.home / "project")},
+                "generated_title": "In progress",
+                "created_at": "2026-08-27T10:00:00Z",
+                "updated_at": "2026-08-27T10:05:00Z",
+            },
+        )
+        self.write_jsonl(
+            sessions / session_id / "updates.jsonl",
+            [
+                {
+                    "params": {
+                        "update": {"sessionUpdate": "user_message_chunk"},
+                        "_meta": {"totalTokens": 2000},
+                    },
+                },
+                {
+                    "params": {
+                        "update": {"sessionUpdate": "agent_thought_chunk"},
+                        "_meta": {"totalTokens": 118056},
+                    },
+                },
+            ],
+        )
+
+        with mock.patch.dict(os.environ, {"GROK_HOME": str(self.home / ".grok")}):
+            rows = list(SESSIONS.scan_grok())
+            SESSIONS.enrich(rows[0], SESSIONS.ScanBudget(seconds=1))
+
+        self.assertEqual(rows[0]["tokens"], 118056)
+        self.assertEqual(rows[0]["tokensLabel"], "118k tok")
+
+    def test_opencode_keeps_database_token_totals(self):
+        db = self.home / ".local/share/opencode/opencode.db"
+        db.parent.mkdir(parents=True)
+        con = sqlite3.connect(db)
+        con.execute(
+            "create table session ("
+            "id text primary key, project_id text, workspace_id text, parent_id text, "
+            "directory text, title text, time_updated integer, time_created integer, "
+            "model text, agent text, cost real, tokens_input integer, "
+            "tokens_output integer, tokens_reasoning integer, slug text)"
+        )
+        con.execute(
+            "insert into session values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("ses_tokens", "project", None, None, str(self.home), "Tokens",
+             2000, 1000, '{"id":"model"}', "build", 1.5, 8000, 1500, 500,
+             "slug"),
+        )
+        con.commit()
+        con.close()
+
+        rows = list(SESSIONS.scan_opencode())
+        SESSIONS.enrich(rows[0], SESSIONS.ScanBudget(seconds=1))
+        self.assertEqual(rows[0]["tokens"], 10000)
+        self.assertEqual(rows[0]["tokensLabel"], "10k tok")
+        self.assertIn("$1.50", rows[0]["meta"])
+
+    def test_copilot_prefers_shutdown_model_metrics(self):
+        session_id = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+        self.write_jsonl(
+            Path(".copilot/session-state") / session_id / "events.jsonl",
+            [
+                {
+                    "type": "session.start",
+                    "data": {
+                        "sessionId": session_id,
+                        "context": {"cwd": str(self.home / "project")},
+                    },
+                },
+                {"type": "user.message", "data": {"content": "Copilot task"}},
+                {
+                    "type": "assistant.message",
+                    "data": {"usage": {"inputTokens": 9, "outputTokens": 1}},
+                },
+                {
+                    "type": "session.shutdown",
+                    "data": {
+                        "modelMetrics": {
+                            "gpt-5": {
+                                "usage": {
+                                    "inputTokens": 200,
+                                    "outputTokens": 50,
+                                    "cacheReadTokens": 30,
+                                    "cacheWriteTokens": 20,
+                                },
+                            },
+                        },
+                    },
+                },
+            ],
+        )
+
+        rows = list(SESSIONS.scan_copilot())
+        SESSIONS.enrich(rows[0], SESSIONS.ScanBudget(seconds=1))
+        self.assertEqual(rows[0]["tokens"], 300)
+        self.assertEqual(rows[0]["tokensLabel"], "300 tok")
+
+    def test_gemini_sums_message_token_records(self):
+        project_root = self.home / "gemini-project"
+        project_root.mkdir()
+        project = Path(".gemini/tmp/gemini-project")
+        self.write_text(project / ".project_root", str(project_root))
+        session_id = "12121212-1212-4121-8121-121212121212"
+        self.write_jsonl(
+            project / "chats" / "session-2026-08-27T12-00-tokens.jsonl",
+            [
+                {
+                    "sessionId": session_id,
+                    "projectHash": "hash",
+                    "kind": "main",
+                },
+                {"id": "u1", "type": "user", "content": "Gemini tokens"},
+                {
+                    "id": "m1",
+                    "type": "gemini",
+                    "content": "ok",
+                    "tokens": {"input": 40, "output": 10, "total": 50},
+                },
+                {
+                    "type": "message_update",
+                    "id": "m2",
+                    "tokens": {"input": 20, "output": 5, "total": 25},
+                },
+            ],
+        )
+
+        rows = list(SESSIONS.scan_gemini())
+        SESSIONS.enrich(rows[0], SESSIONS.ScanBudget(seconds=1))
+        self.assertEqual(rows[0]["tokens"], 75)
+        self.assertEqual(rows[0]["tokensLabel"], "75 tok")
+
+    def test_normalize_session_exports_token_fields(self):
+        normalized = SESSIONS.normalize_session({
+            "id": "11111111-1111-4111-8111-111111111111",
+            "title": "Hello",
+            "dir": str(self.home),
+            "mtime": 1,
+            "tokens": 1077398,
+            "tokensLabel": "1.1M tok",
+            "meta": "1.1M tok · grok-4.6",
+        }, "grok", SESSIONS.ScanBudget(seconds=1))
+        self.assertEqual(normalized["tokens"], 1077398)
+        self.assertEqual(normalized["tokensLabel"], "1.1M tok")
+        self.assertIn("1.1M tok", normalized["meta"])
+
 
 if __name__ == "__main__":
     unittest.main()
