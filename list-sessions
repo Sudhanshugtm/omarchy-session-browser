@@ -489,6 +489,142 @@ def fmt_dur(seconds):
     return "%d d" % round(seconds / 86400)
 
 
+def as_int(value):
+    try:
+        if isinstance(value, bool) or value is None:
+            return 0
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def fmt_tokens(n, truncated=False):
+    n = as_int(n)
+    if n <= 0:
+        return ""
+    if n < 1000:
+        label = "%d tok" % n
+    elif n < 10000:
+        label = "%.1fk tok" % (n / 1000.0)
+    elif n < 1000000:
+        label = "%dk tok" % round(n / 1000.0)
+    elif n < 10000000:
+        label = "%.1fM tok" % (n / 1000000.0)
+    else:
+        label = "%dM tok" % round(n / 1000000.0)
+    return label + ("+" if truncated else "")
+
+
+def fmt_token_short(n):
+    label = fmt_tokens(n)
+    if label.endswith(" tok+"):
+        return label[:-5] + "+"
+    if label.endswith(" tok"):
+        return label[:-4]
+    return label
+
+
+def fmt_context(used, limit, truncated=False):
+    """Match Grok's status bar: 163k/500k rather than cumulative billed tokens."""
+    left = fmt_token_short(used)
+    right = fmt_token_short(limit)
+    if left and right:
+        return left + "/" + right + ("+" if truncated else "")
+    return fmt_tokens(used, truncated)
+
+
+GROK_COST_TICKS = 10_000_000_000
+
+
+def fmt_cost(value, ticks=False):
+    try:
+        usd = float(value or 0)
+        if ticks:
+            usd = usd / GROK_COST_TICKS
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if usd < 0.01:
+        return ""
+    return "$%.2f" % usd
+
+
+def usage_tokens(usage):
+    """Billed tokens from one provider usage object, without double-counting cache."""
+    usage = as_dict(usage)
+    if not usage:
+        return 0
+    for key in ("totalTokens", "total_tokens", "total"):
+        n = as_int(usage.get(key))
+        if n:
+            return n
+    claude = (as_int(usage.get("input_tokens"))
+              + as_int(usage.get("output_tokens"))
+              + as_int(usage.get("cache_creation_input_tokens"))
+              + as_int(usage.get("cache_read_input_tokens")))
+    if claude:
+        return claude
+    camel = (as_int(usage.get("inputTokens"))
+             + as_int(usage.get("outputTokens"))
+             + as_int(usage.get("cacheReadTokens"))
+             + as_int(usage.get("cachedReadTokens"))
+             + as_int(usage.get("cacheWriteTokens"))
+             + as_int(usage.get("cacheCreationTokens"))
+             + as_int(usage.get("reasoningTokens"))
+             + as_int(usage.get("cached_input_tokens"))
+             + as_int(usage.get("reasoning_output_tokens"))
+             + as_int(usage.get("prompt_tokens"))
+             + as_int(usage.get("completion_tokens"))
+             + as_int(usage.get("cached_prompt_tokens"))
+             + as_int(usage.get("promptTokenCount"))
+             + as_int(usage.get("candidatesTokenCount"))
+             + as_int(usage.get("thoughtsTokenCount"))
+             + as_int(usage.get("cachedContentTokenCount")))
+    if camel:
+        return camel
+    return (as_int(usage.get("input")) + as_int(usage.get("output"))
+            + as_int(usage.get("cached")) + as_int(usage.get("thoughts"))
+            + as_int(usage.get("tool")))
+
+
+TOKEN_HINTS = ('"usage"', "token_count", "totalTokens", "total_tokens",
+               "modelMetrics", "usageMetadata", '"tokens"')
+
+
+def tokens_from_record(agent, obj):
+    """Return billed tokens encoded on one JSONL/JSON record, or 0."""
+    if not isinstance(obj, dict):
+        return 0
+    if agent == "claude":
+        return usage_tokens(as_dict(as_dict(obj.get("message")).get("usage")))
+    if agent == "codex":
+        payload = as_dict(obj.get("payload"))
+        if obj.get("type") == "event_msg" and payload.get("type") == "token_count":
+            info = as_dict(payload.get("info"))
+            snap = as_dict(info.get("total_token_usage") or info.get("totalTokenUsage"))
+            return usage_tokens(snap) or usage_tokens(info)
+        return 0
+    if agent == "copilot":
+        data = as_dict(obj.get("data"))
+        if obj.get("type") == "session.shutdown":
+            total = 0
+            metrics = data.get("modelMetrics")
+            if isinstance(metrics, dict):
+                for model in metrics.values():
+                    if isinstance(model, dict):
+                        total += usage_tokens(as_dict(model.get("usage")))
+            return total
+        return usage_tokens(as_dict(data.get("usage") or obj.get("usage")))
+    if agent == "gemini":
+        tokens = obj.get("tokens") or obj.get("usageMetadata")
+        if tokens is None:
+            tokens = as_dict(obj.get("$set")).get("tokens")
+        return usage_tokens(as_dict(tokens))
+    if agent == "pi":
+        msg = as_dict(obj.get("message"))
+        return usage_tokens(as_dict(msg.get("usage") or obj.get("usage")))
+    return 0
+
+
 def parse_iso(ts):
     try:
         return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
@@ -496,13 +632,15 @@ def parse_iso(ts):
         return None
 
 
-def file_span_and_counts(path, needles, budget, size):
+def file_span_and_counts(path, needles, budget, size, token_agent=None):
     """Bounded pass for small transcripts; large files report size only."""
     counts = {n: 0 for n in needles}
     first_ts = last_ts = None
     model = ""
+    tokens = 0
+    snapshot = False
     if size > METADATA_FILE_MAX:
-        return counts, 0, model, True
+        return counts, 0, model, True, 0
     bytes_before = budget.bytes
     for line in iter_regular_lines(path, budget, METADATA_FILE_MAX):
         for needle in needles:
@@ -519,9 +657,22 @@ def file_span_and_counts(path, needles, budget, size):
                 if first_ts is None:
                     first_ts = timestamp
                 last_ts = timestamp
+        if token_agent and any(hint in line for hint in TOKEN_HINTS):
+            obj = parse_json_dict(line, budget)
+            n = tokens_from_record(token_agent, obj)
+            if not n:
+                continue
+            if token_agent == "codex" or (
+                    token_agent == "copilot"
+                    and isinstance(obj, dict)
+                    and obj.get("type") == "session.shutdown"):
+                tokens = n
+                snapshot = True
+            elif not snapshot:
+                tokens += n
     complete = budget.bytes - bytes_before >= size
     dur = int(last_ts - first_ts) if complete and first_ts and last_ts else 0
-    return counts, dur, model, not complete
+    return counts, dur, model, not complete, tokens
 
 
 # --- scanners: cheap listing pass ------------------------------------------
@@ -652,16 +803,8 @@ def scan_opencode(budget=None):
         model_id = clean_inline(parsed_model.get("id", ""), 128) \
             if parsed_model is not None else clean_inline(model or "", 128)
         meta = []
-        try:
-            if float(tokens or 0):
-                meta.append("%.0fk tok" % (float(tokens) / 1000))
-        except (TypeError, ValueError, OverflowError):
-            pass
-        try:
-            if float(cost or 0):
-                meta.append("$%.2f" % float(cost))
-        except (TypeError, ValueError, OverflowError):
-            pass
+        session_tokens = as_int(tokens)
+        cost_label = fmt_cost(cost)
         if model_id:
             meta.append(model_id)
         if upd and created:
@@ -670,6 +813,7 @@ def scan_opencode(budget=None):
             meta.append(slug)
         yield {"agent": "opencode", "id": sid, "title": title or sid,
                "dir": directory or HOME, "mtime": sec(upd),
+               "tokens": session_tokens, "costLabel": cost_label,
                "meta": " · ".join(meta)}
 
 
@@ -889,15 +1033,123 @@ PEEKABLE = {"claude", "codex", "opencode"}
 
 # --- metadata enrichment (only for the sessions that made the cut) ---------
 
+def iter_regular_lines_reversed(path, budget, max_file_bytes):
+    """Yield complete decoded lines from EOF backwards, skipping oversized ones."""
+    fd, info = open_regular_fd(path, budget)
+    if fd is None:
+        return
+    try:
+        pos = info.st_size
+        buf = b""
+        read_total = 0
+        while pos > 0 and read_total < max_file_bytes and budget.active():
+            take = min(65536, pos, max_file_bytes - read_total)
+            allowance = budget.read_allowance(take)
+            if allowance <= 0:
+                return
+            take = min(take, allowance)
+            pos -= take
+            os.lseek(fd, pos, os.SEEK_SET)
+            data = os.read(fd, take)
+            if not data:
+                return
+            budget.account(len(data))
+            read_total += len(data)
+            buf = data + buf
+            while True:
+                nl = buf.rfind(b"\n")
+                if nl < 0:
+                    break
+                raw = buf[nl + 1:]
+                buf = buf[:nl]
+                if not raw or len(raw) > MAX_LINE:
+                    continue
+                yield raw.decode("utf-8", errors="replace")
+        if buf and len(buf) <= MAX_LINE:
+            yield buf.decode("utf-8", errors="replace")
+    except OSError:
+        return
+    finally:
+        os.close(fd)
+
+
+def grok_usage(summary_path, budget):
+    """Grok context fill, plus billed total from the last completed turn.
+
+    Grok's TUI bar is contextTokensUsed / contextWindowTokens (e.g. 163k/500k).
+    turn_completed.usage.totalTokens is cumulative billed tokens across model
+    calls — roughly context × turns — so it is not the row label.
+    """
+    session_dir = os.path.dirname(summary_path)
+    used = limit = billed = cost_ticks = 0
+    signals = read_json_file(os.path.join(session_dir, "signals.json"), budget)
+    if signals:
+        used = as_int(signals.get("contextTokensUsed"))
+        limit = as_int(signals.get("contextWindowTokens"))
+    billed, cost_ticks, truncated, context_fallback = grok_updates_usage(
+        os.path.join(session_dir, "updates.jsonl"), budget)
+    if not used:
+        used = context_fallback
+    return used, limit, billed, cost_ticks, truncated
+
+
+def grok_updates_usage(updates, budget):
+    """Last turn_completed billed usage, plus latest _meta.totalTokens fallback."""
+    info = regular_lstat(updates, budget)
+    if info is None:
+        return 0, 0, False, 0
+    needle = '"sessionUpdate": "turn_completed"'
+    compact = '"sessionUpdate":"turn_completed"'
+    billed = cost_ticks = context_fallback = 0
+    for line in iter_regular_lines_reversed(updates, budget, METADATA_FILE_MAX):
+        want_completed = needle in line or compact in line
+        if not want_completed and (context_fallback or "totalTokens" not in line):
+            continue
+        params = as_dict(as_dict(parse_json_dict(line, budget)).get("params"))
+        if want_completed:
+            update = as_dict(params.get("update"))
+            if update.get("sessionUpdate") != "turn_completed":
+                continue
+            usage = as_dict(update.get("usage"))
+            tokens = usage_tokens(usage)
+            ticks = as_int(usage.get("costUsdTicks"))
+            if not billed and (tokens or ticks):
+                billed, cost_ticks = tokens, ticks
+        elif not context_fallback:
+            context_fallback = as_int(as_dict(params.get("_meta")).get("totalTokens"))
+        if billed and context_fallback:
+            break
+    truncated = info.st_size > 0 and not billed and not context_fallback
+    return billed, cost_ticks, truncated, context_fallback
+
+
+def attach_token_meta(s, truncated=False):
+    """Put token count (and cost) first on the selected-row metadata line."""
+    label = s.get("tokensLabel") or fmt_tokens(s.get("tokens") or 0, truncated)
+    s["tokensLabel"] = label
+    billed = s.get("billedLabel") or ""
+    cost = s.get("costLabel") or ""
+    front = [p for p in (label, billed, cost) if p]
+    rest = []
+    for part in (s.get("meta") or "").split(" · "):
+        if not part or part in front or part.endswith(" tok") or part.endswith(" billed"):
+            continue
+        rest.append(part)
+    s["meta"] = " · ".join(front + rest)
+    return s
+
+
 def enrich(s, budget):
-    if "meta" in s:
-        return s
     path = s.get("path")
     size = int(s.get("size") or 0)
-    meta = []
-    if s["agent"] == "claude":
-        counts, dur, model, truncated = file_span_and_counts(
-            path, ['"type":"user"', '"type":"assistant"'], budget, size)
+    truncated = False
+    agent = s["agent"]
+    if agent == "claude":
+        counts, dur, model, truncated, tokens = file_span_and_counts(
+            path, ['"type":"user"', '"type":"assistant"'], budget, size,
+            token_agent="claude")
+        s["tokens"] = tokens
+        meta = []
         msgs = counts['"type":"user"'] + counts['"type":"assistant"']
         if msgs:
             meta.append("%d%s msgs" % (msgs, "+" if truncated else ""))
@@ -906,9 +1158,12 @@ def enrich(s, budget):
         if dur and not truncated:
             meta.append(fmt_dur(dur))
         meta.append(fmt_size(size))
-    elif s["agent"] == "codex":
-        counts, dur, model, truncated = file_span_and_counts(
-            path, ['"ordinal"'], budget, size)
+        s["meta"] = " · ".join(meta)
+    elif agent == "codex":
+        counts, dur, model, truncated, tokens = file_span_and_counts(
+            path, ['"ordinal"'], budget, size, token_agent="codex")
+        s["tokens"] = tokens
+        meta = []
         if counts['"ordinal"']:
             meta.append("%d%s events" % (counts['"ordinal"'], "+" if truncated else ""))
         if model:
@@ -916,11 +1171,36 @@ def enrich(s, budget):
         if dur and not truncated:
             meta.append(fmt_dur(dur))
         meta.append(fmt_size(size))
+        s["meta"] = " · ".join(meta)
+    elif agent == "grok":
+        used, limit, billed, cost_ticks, truncated = grok_usage(path, budget)
+        if used:
+            s["tokens"] = used
+        if used and limit:
+            s["tokensLabel"] = fmt_context(used, limit, truncated)
+        billed_short = fmt_token_short(billed)
+        if billed_short and billed != used:
+            s["billedLabel"] = billed_short + " billed"
+        cost = fmt_cost(cost_ticks, ticks=True)
+        if cost:
+            s["costLabel"] = cost
+    elif agent == "opencode":
+        pass
+    elif agent in ("copilot", "pi", "gemini") and path:
+        needles = {
+            "copilot": ['"type":"user.message"'],
+            "pi": ['"role": "user"', '"role":"user"'],
+            "gemini": ['"type":"user"', '"role":"user"'],
+        }[agent]
+        _counts, _dur, _model, truncated, tokens = file_span_and_counts(
+            path, needles, budget, size, token_agent=agent)
+        s["tokens"] = tokens
+        if "meta" not in s:
+            s["meta"] = fmt_size(size) if size else ""
     else:
-        if size:
-            meta.append(fmt_size(size))
-    s["meta"] = " · ".join(meta)
-    return s
+        if "meta" not in s:
+            s["meta"] = fmt_size(size) if size else ""
+    return attach_token_meta(s, truncated)
 
 
 def present_agents(sessions):
@@ -949,6 +1229,8 @@ def normalize_session(session, agent, budget):
     metadata = clean_inline(session.get("meta") or "", META_TEXT_MAX)
     short = "~" + directory[len(HOME):] if directory.startswith(HOME) else directory
     short = clean_inline(short, PATH_TEXT_MAX)
+    tokens = as_int(session.get("tokens"))
+    tokens_label = clean_inline(session.get("tokensLabel") or fmt_tokens(tokens), 32)
     return {
         "agent": agent,
         "id": sid,
@@ -957,6 +1239,8 @@ def normalize_session(session, agent, budget):
         "dirShort": short,
         "mtime": int(session.get("mtime") or 0),
         "meta": metadata,
+        "tokens": tokens,
+        "tokensLabel": tokens_label,
         "agentName": AGENTS[agent]["name"],
         "badge": AGENTS[agent]["badge"],
         "icon": AGENTS[agent]["icon"],

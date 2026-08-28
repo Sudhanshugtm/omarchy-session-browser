@@ -5,11 +5,12 @@ coding sessions have I run on this machine, and how do I get back into one?**
 
 It discovers past sessions from **Claude Code, Codex, opencode, Copilot CLI,
 Pi, Gemini CLI, and Grok Build** and lists them newest-first with the opening
-prompt or title, project directory, and relative age. Filter by agent with one
-click, then **Enter resumes the exact session in a terminal**, opened in its
-original working directory. The selected row expands with metadata (message
-count, model, duration, size — plus token count and cost for opencode) and
-per-session controls.
+prompt or title, project directory, relative age, and **tokens consumed** when
+the agent recorded usage. Filter by agent with one click, then **Enter resumes
+the exact session in a terminal**, opened in its original working directory.
+The selected row expands with metadata (token count, message count, model,
+duration, size — plus cost when the agent recorded it) and per-session
+controls.
 
 ![The panel](preview.png)
 
@@ -27,6 +28,14 @@ unsandboxed).
   `$GROK_HOME/sessions/` (or `~/.grok/sessions/`), and opencode's sqlite
   database (opened read-only). Local reads only; **no network access, no
   telemetry, nothing written to disk**.
+- **Token usage** (and cost when the agent stored it) is taken from those
+  same files: Claude sums per-turn `message.usage`, Codex uses the last
+  `token_count` snapshot, Grok shows the same context fill as its TUI bar
+  (`contextTokensUsed` / `contextWindowTokens`, e.g. `163k/500k`) and puts
+  cumulative billed tokens on the selected-row metadata, opencode reads
+  sqlite `tokens_*` + `cost`, Copilot prefers `session.shutdown` model
+  metrics, and Gemini/Pi sum per-message usage. Rows without recorded usage
+  omit the count.
 - Shows resumable top-level conversations, not worker sessions. It uses each
   agent's native hierarchy marker: Codex thread metadata, Claude sidechains,
   opencode's `parent_id`, Gemini's nested/kind metadata, and Grok's

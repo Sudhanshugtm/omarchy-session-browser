@@ -519,15 +519,30 @@ Panel {
               }
             }
 
-            Text {
+            Column {
               id: rowAge
               anchors.right: parent.right
               anchors.rightMargin: Style.space(16)
               anchors.verticalCenter: parent.verticalCenter
-              text: root.fmtAge(modelData.mtime)
-              color: root.dimmed
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.bodySmall
+              spacing: Style.space(1)
+
+              Text {
+                anchors.right: parent.right
+                visible: String(row.modelData.tokensLabel || "") !== ""
+                text: String(row.modelData.tokensLabel || "")
+                textFormat: Text.PlainText
+                color: root.dimmed
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+
+              Text {
+                anchors.right: parent.right
+                text: root.fmtAge(modelData.mtime)
+                color: root.dimmed
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
             }
 
             MouseArea {
