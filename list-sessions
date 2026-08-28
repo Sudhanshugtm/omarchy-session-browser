@@ -515,6 +515,24 @@ def fmt_tokens(n, truncated=False):
     return label + ("+" if truncated else "")
 
 
+def fmt_token_short(n):
+    label = fmt_tokens(n)
+    if label.endswith(" tok+"):
+        return label[:-5] + "+"
+    if label.endswith(" tok"):
+        return label[:-4]
+    return label
+
+
+def fmt_context(used, limit, truncated=False):
+    """Match Grok's status bar: 163k/500k rather than cumulative billed tokens."""
+    left = fmt_token_short(used)
+    right = fmt_token_short(limit)
+    if left and right:
+        return left + "/" + right + ("+" if truncated else "")
+    return fmt_tokens(used, truncated)
+
+
 GROK_COST_TICKS = 10_000_000_000
 
 
@@ -1056,23 +1074,36 @@ def iter_regular_lines_reversed(path, budget, max_file_bytes):
 
 
 def grok_usage(summary_path, budget):
-    """Last turn_completed.usage from the sibling updates.jsonl.
+    """Grok context fill, plus billed total from the last completed turn.
 
-    Scan from EOF so a long live session (or a file past METADATA_FILE_MAX)
-    still reports the latest cumulative total. Only records whose
-    sessionUpdate is exactly turn_completed are counted — the phrase also
-    appears inside tool payloads.
+    Grok's TUI bar is contextTokensUsed / contextWindowTokens (e.g. 163k/500k).
+    turn_completed.usage.totalTokens is cumulative billed tokens across model
+    calls — roughly context × turns — so it is not the row label.
     """
-    updates = os.path.join(os.path.dirname(summary_path), "updates.jsonl")
+    session_dir = os.path.dirname(summary_path)
+    used = limit = billed = cost_ticks = 0
+    signals = read_json_file(os.path.join(session_dir, "signals.json"), budget)
+    if signals:
+        used = as_int(signals.get("contextTokensUsed"))
+        limit = as_int(signals.get("contextWindowTokens"))
+    billed, cost_ticks, truncated, context_fallback = grok_updates_usage(
+        os.path.join(session_dir, "updates.jsonl"), budget)
+    if not used:
+        used = context_fallback
+    return used, limit, billed, cost_ticks, truncated
+
+
+def grok_updates_usage(updates, budget):
+    """Last turn_completed billed usage, plus latest _meta.totalTokens fallback."""
     info = regular_lstat(updates, budget)
     if info is None:
-        return 0, 0, False
+        return 0, 0, False, 0
     needle = '"sessionUpdate": "turn_completed"'
     compact = '"sessionUpdate":"turn_completed"'
-    fallback = 0
+    billed = cost_ticks = context_fallback = 0
     for line in iter_regular_lines_reversed(updates, budget, METADATA_FILE_MAX):
         want_completed = needle in line or compact in line
-        if not want_completed and (fallback or "totalTokens" not in line):
+        if not want_completed and (context_fallback or "totalTokens" not in line):
             continue
         params = as_dict(as_dict(parse_json_dict(line, budget)).get("params"))
         if want_completed:
@@ -1081,23 +1112,27 @@ def grok_usage(summary_path, budget):
                 continue
             usage = as_dict(update.get("usage"))
             tokens = usage_tokens(usage)
-            cost_ticks = as_int(usage.get("costUsdTicks"))
-            if tokens or cost_ticks:
-                return tokens, cost_ticks, False
-        elif not fallback:
-            fallback = as_int(as_dict(params.get("_meta")).get("totalTokens"))
-    return fallback, 0, info.st_size > 0 and not fallback
+            ticks = as_int(usage.get("costUsdTicks"))
+            if not billed and (tokens or ticks):
+                billed, cost_ticks = tokens, ticks
+        elif not context_fallback:
+            context_fallback = as_int(as_dict(params.get("_meta")).get("totalTokens"))
+        if billed and context_fallback:
+            break
+    truncated = info.st_size > 0 and not billed and not context_fallback
+    return billed, cost_ticks, truncated, context_fallback
 
 
 def attach_token_meta(s, truncated=False):
     """Put token count (and cost) first on the selected-row metadata line."""
-    label = fmt_tokens(s.get("tokens") or 0, truncated)
+    label = s.get("tokensLabel") or fmt_tokens(s.get("tokens") or 0, truncated)
     s["tokensLabel"] = label
+    billed = s.get("billedLabel") or ""
     cost = s.get("costLabel") or ""
-    front = [p for p in (label, cost) if p]
+    front = [p for p in (label, billed, cost) if p]
     rest = []
     for part in (s.get("meta") or "").split(" · "):
-        if not part or part in front or part.endswith(" tok"):
+        if not part or part in front or part.endswith(" tok") or part.endswith(" billed"):
             continue
         rest.append(part)
     s["meta"] = " · ".join(front + rest)
@@ -1138,9 +1173,14 @@ def enrich(s, budget):
         meta.append(fmt_size(size))
         s["meta"] = " · ".join(meta)
     elif agent == "grok":
-        tokens, cost_ticks, truncated = grok_usage(path, budget)
-        if tokens:
-            s["tokens"] = tokens
+        used, limit, billed, cost_ticks, truncated = grok_usage(path, budget)
+        if used:
+            s["tokens"] = used
+        if used and limit:
+            s["tokensLabel"] = fmt_context(used, limit, truncated)
+        billed_short = fmt_token_short(billed)
+        if billed_short and billed != used:
+            s["billedLabel"] = billed_short + " billed"
         cost = fmt_cost(cost_ticks, ticks=True)
         if cost:
             s["costLabel"] = cost

@@ -595,6 +595,7 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(SESSIONS.fmt_tokens(428000), "428k tok")
         self.assertEqual(SESSIONS.fmt_tokens(1077398), "1.1M tok")
         self.assertEqual(SESSIONS.fmt_tokens(1200, truncated=True), "1.2k tok+")
+        self.assertEqual(SESSIONS.fmt_context(163314, 500000), "163k/500k")
 
     def test_claude_sums_per_turn_usage(self):
         session_id = "abababab-abab-4bab-8bab-abababababab"
@@ -700,6 +701,10 @@ class ScannerTests(unittest.TestCase):
                 "current_model_id": "grok-4.6",
             },
         )
+        self.write_json(
+            sessions / session_id / "signals.json",
+            {"contextTokensUsed": 163314, "contextWindowTokens": 500000},
+        )
         self.write_jsonl(
             sessions / session_id / "updates.jsonl",
             [
@@ -725,7 +730,7 @@ class ScannerTests(unittest.TestCase):
                             "usage": {
                                 "inputTokens": 1000,
                                 "outputTokens": 200,
-                                "totalTokens": 1200,
+                                "totalTokens": 1592684,
                                 "cachedReadTokens": 800,
                                 "reasoningTokens": 50,
                                 "costUsdTicks": 1800000000,
@@ -740,10 +745,12 @@ class ScannerTests(unittest.TestCase):
             rows = list(SESSIONS.scan_grok())
             SESSIONS.enrich(rows[0], SESSIONS.ScanBudget(seconds=1))
 
-        self.assertEqual(rows[0]["tokens"], 1200)
-        self.assertEqual(rows[0]["tokensLabel"], "1.2k tok")
+        self.assertEqual(rows[0]["tokens"], 163314)
+        self.assertEqual(rows[0]["tokensLabel"], "163k/500k")
+        self.assertEqual(rows[0]["billedLabel"], "1.6M billed")
         self.assertEqual(rows[0]["costLabel"], "$0.18")
-        self.assertIn("1.2k tok", rows[0]["meta"])
+        self.assertTrue(rows[0]["meta"].startswith("163k/500k"))
+        self.assertIn("1.6M billed", rows[0]["meta"])
         self.assertIn("$0.18", rows[0]["meta"])
 
     def test_grok_usage_reads_from_eof_past_noise_and_size_cap(self):
@@ -798,6 +805,10 @@ class ScannerTests(unittest.TestCase):
             },
         })
         self.write_jsonl(sessions / session_id / "updates.jsonl", records)
+        self.write_json(
+            sessions / session_id / "signals.json",
+            {"contextTokensUsed": 4000, "contextWindowTokens": 500000},
+        )
         self.assertGreater(path.stat().st_size, 2048)
 
         with mock.patch.object(SESSIONS, "METADATA_FILE_MAX", 2048), \
@@ -805,8 +816,9 @@ class ScannerTests(unittest.TestCase):
             rows = list(SESSIONS.scan_grok())
             SESSIONS.enrich(rows[0], SESSIONS.ScanBudget(seconds=1))
 
-        self.assertEqual(rows[0]["tokens"], 12000)
-        self.assertEqual(rows[0]["tokensLabel"], "12k tok")
+        self.assertEqual(rows[0]["tokens"], 4000)
+        self.assertEqual(rows[0]["tokensLabel"], "4.0k/500k")
+        self.assertEqual(rows[0]["billedLabel"], "12k billed")
 
     def test_grok_falls_back_to_latest_context_when_turn_still_open(self):
         session_id = "1a1a1a1a-1a1a-41a1-81a1-1a1a1a1a1a1a"

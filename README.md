@@ -28,13 +28,14 @@ unsandboxed).
   `$GROK_HOME/sessions/` (or `~/.grok/sessions/`), and opencode's sqlite
   database (opened read-only). Local reads only; **no network access, no
   telemetry, nothing written to disk**.
-- **Tokens consumed** (and cost when the agent stored it) are taken from those
+- **Token usage** (and cost when the agent stored it) is taken from those
   same files: Claude sums per-turn `message.usage`, Codex uses the last
-  `token_count` snapshot, Grok prefers `turn_completed.usage` and falls back
-  to the latest context total on an open turn, opencode reads sqlite
-  `tokens_*` + `cost`, Copilot prefers `session.shutdown` model metrics, and
-  Gemini/Pi sum per-message usage. Rows without recorded usage omit the
-  count.
+  `token_count` snapshot, Grok shows the same context fill as its TUI bar
+  (`contextTokensUsed` / `contextWindowTokens`, e.g. `163k/500k`) and puts
+  cumulative billed tokens on the selected-row metadata, opencode reads
+  sqlite `tokens_*` + `cost`, Copilot prefers `session.shutdown` model
+  metrics, and Gemini/Pi sum per-message usage. Rows without recorded usage
+  omit the count.
 - Shows resumable top-level conversations, not worker sessions. It uses each
   agent's native hierarchy marker: Codex thread metadata, Claude sidechains,
   opencode's `parent_id`, Gemini's nested/kind metadata, and Grok's
