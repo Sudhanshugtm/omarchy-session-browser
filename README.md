@@ -4,8 +4,9 @@ A native [Omarchy](https://omarchy.org/) bar panel that answers: **what AI
 coding sessions have I run on this machine, and how do I get back into one?**
 
 It discovers past sessions from **Claude Code, Codex, opencode, Copilot CLI,
-Pi, Gemini CLI, and Grok Build** and lists them newest-first with the opening
-prompt or title, project directory, and relative age. Filter by agent with one
+Pi, Gemini CLI, Grok Build, and Antigravity (`agy`)** and lists them
+newest-first with the opening prompt or title, project directory, and relative
+age. Filter by agent with one
 click, then **Enter resumes the exact session in a terminal**, opened in its
 original working directory. The selected row expands with metadata (message
 count, model, duration, size — plus token count and cost for opencode) and
@@ -24,14 +25,17 @@ unsandboxed).
 
 - Reads session transcripts under `~/.claude/projects/`, `~/.codex/sessions/`,
   `~/.copilot/`, `~/.pi/agent/sessions/`, `~/.gemini/tmp/`, Grok's
-  `$GROK_HOME/sessions/` (or `~/.grok/sessions/`), and opencode's sqlite
-  database (opened read-only). Local reads only; **no network access, no
-  telemetry, nothing written to disk**.
+  `$GROK_HOME/sessions/` (or `~/.grok/sessions/`), and the sqlite databases of
+  opencode (`~/.local/share/opencode/opencode.db`) and Antigravity's `agy` CLI
+  (`~/.gemini/antigravity-cli/conversation_summaries.db`) — all opened
+  read-only. Local reads only; **no network access, no telemetry, nothing
+  written to disk**.
 - Shows resumable top-level conversations, not worker sessions. It uses each
   agent's native hierarchy marker: Codex thread metadata, Claude sidechains,
-  opencode's `parent_id`, Gemini's nested/kind metadata, and Grok's
-  `session_kind` plus child registry. Copilot keeps child events inside the
-  parent log, while Pi's built-in subagents run without persistent sessions.
+  opencode's `parent_id`, Gemini's nested/kind metadata, Grok's `session_kind`
+  plus child registry, and Antigravity's `parent_conversation_id` /
+  `nesting_depth`. Copilot keeps child events inside the parent log, while Pi's
+  built-in subagents run without persistent sessions.
   Explicit user forks remain visible.
 - **Hard bounds before parsing:** each provider considers at most 128 matching
   candidates and returns at most 50 sessions. A scan has cumulative ceilings
@@ -57,9 +61,9 @@ unsandboxed).
 
 - **Resume** — launches that agent's own targeted resume command (`claude
   --resume <id>`, `codex resume <id>`, `opencode --session <id>`, `copilot
-  --resume <id>`, `pi --session <path>`, `gemini --resume <id>`, or `grok
-  --resume <id>`) in a new terminal via `xdg-terminal-exec`, `cd`'d to the
-  session's directory.
+  --resume <id>`, `pi --session <path>`, `gemini --resume <id>`, `grok
+  --resume <id>`, or `agy --conversation <id>`) in a new terminal via
+  `xdg-terminal-exec`, `cd`'d to the session's directory.
 - **Peek** — renders the transcript (control characters stripped) into a
   floating terminal with `less`, with independent three-second, 8 MiB, and
   400-block limits. Its opencode query streams at most 400 bounded rows rather
@@ -130,9 +134,10 @@ session stores are never touched by removal.
 ## Credits
 
 Bundled agent logos are from [Simple Icons](https://simpleicons.org/) (CC0).
-Grok uses Omarchy's icon-font mark, sourced from Grok's official favicon.
-Trademarks and logos remain the property of their respective owners and appear
-here for identification only.
+Grok uses Omarchy's icon-font mark, sourced from Grok's official favicon; the
+Antigravity mark is its own product icon; Pi falls back to a plain Nerd Font
+glyph. Trademarks and logos remain the property of their respective owners and
+appear here for identification only.
 
 ## License
 

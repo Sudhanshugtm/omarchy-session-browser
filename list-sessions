@@ -61,6 +61,8 @@ AGENTS = {
                  "icon": chr(0xEB54), "color": "#4796E3"},
     "grok":     {"name": "Grok",        "badge": "GR", "iconFile": "",
                  "icon": chr(0xE904), "iconFont": "omarchy", "color": "#D8D8D8"},
+    "agy":      {"name": "Antigravity", "badge": "AG", "iconFile": "icons/antigravity.svg",
+                 "icon": chr(0xF135), "color": "#4285F4"},
 }
 
 MODEL_RE = re.compile(r'"model"\s*:\s*"([^"]+)"')
@@ -871,6 +873,79 @@ def scan_grok(budget=None):
                "size": file_info.st_size}
 
 
+AGY_FRACTION_RE = re.compile(r"(\.\d{6})\d+")
+
+
+def agy_home():
+    return HOME + "/.gemini/antigravity-cli"
+
+
+def agy_workspace_dir(raw):
+    """First workspace file:// URI from the stored JSON array, as a real dir."""
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else None
+    except ValueError:
+        parsed = None
+    for item in as_list(parsed):
+        if not isinstance(item, str) or not item.startswith("file://"):
+            continue
+        path = urllib.parse.unquote(urllib.parse.urlparse(item).path)
+        if path and len(path) <= PATH_TEXT_MAX and os.path.isdir(path):
+            return path
+    return HOME
+
+
+def scan_agy(budget=None):
+    budget = ensure_budget(budget)
+    # The `agy` CLI keeps one row per conversation here; per-conversation
+    # transcripts live in conversations/<id>.db. nesting_depth/parent mark the
+    # subagent conversations it spawns, exactly as Grok's registry does.
+    db = agy_home() + "/conversation_summaries.db"
+    try:
+        fallback_mtime = int(os.lstat(db).st_mtime)
+    except OSError:
+        fallback_mtime = 0
+    con = open_sqlite_readonly(db, budget)
+    if con is None:
+        return
+    try:
+        cursor = con.execute(
+            "select substr(conversation_id, 1, 120), substr(title, 1, 1024),"
+            " substr(preview, 1, 1024), step_count,"
+            " substr(last_modified_time, 1, 64), substr(workspace_uris, 1, 4096),"
+            " substr(agent_name, 1, 128), substr(parent_conversation_id, 1, 120),"
+            " nesting_depth from conversation_summaries"
+            " where coalesce(parent_conversation_id, '') = ''"
+            " and coalesce(nesting_depth, 0) = 0"
+            " order by last_modified_time desc limit ?", (PER_AGENT_CAP,))
+        rows = []
+        for row in cursor:
+            if not budget.active() or len(rows) >= PER_AGENT_CAP:
+                break
+            rows.append(row)
+    except sqlite3.Error:
+        return
+    finally:
+        con.close()
+    for sid, title, preview, steps, updated, uris, agent_name, parent, depth in rows:
+        if not sid or parent or (isinstance(depth, int) and depth > 0):
+            continue
+        mtime = parse_iso(AGY_FRACTION_RE.sub(r"\1", str(updated or "")))
+        meta = []
+        try:
+            if int(steps or 0) > 0:
+                meta.append("%d steps" % int(steps))
+        except (TypeError, ValueError):
+            pass
+        if agent_name:
+            meta.append(clean_inline(agent_name, 64))
+        yield {"agent": "agy", "id": sid,
+               "title": title or preview or sid[:8],
+               "dir": agy_workspace_dir(uris),
+               "mtime": int(mtime or fallback_mtime),
+               "meta": " · ".join(meta)}
+
+
 SCANNERS = {
     "claude": scan_claude,
     "codex": scan_codex,
@@ -879,6 +954,7 @@ SCANNERS = {
     "pi": scan_pi,
     "gemini": scan_gemini,
     "grok": scan_grok,
+    "agy": scan_agy,
 }
 
 # Agents whose sessions we know how to delete.
@@ -1071,6 +1147,7 @@ ID_PATTERNS = {
     "copilot":  r"^[A-Za-z0-9._-]{1,120}$",
     "gemini":   r"^[A-Za-z0-9._-]{1,120}$",
     "grok":     r"^[0-9a-fA-F-]{8,64}$",
+    "agy":      r"^[0-9a-fA-F-]{8,64}$",
 }
 
 
@@ -1121,6 +1198,7 @@ def resume(agent, sid):
         "pi":       "pi --session " + shq(sid),
         "gemini":   "gemini --resume " + shq(sid),
         "grok":     "grok --resume " + shq(sid),
+        "agy":      "agy --conversation " + shq(sid),
     }[agent]
     open_terminal("cd " + shq(cwd) + " && " + inner +
                   "; ec=$?; if [ $ec -ne 0 ]; then echo; "

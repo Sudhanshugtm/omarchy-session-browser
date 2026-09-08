@@ -325,6 +325,53 @@ class ScannerTests(unittest.TestCase):
                          "Main Grok task")
         self.assertIn("grok-code-fast-1", rows[0]["meta"])
 
+    def test_agy_lists_conversations_and_excludes_nested_ones(self):
+        workspace = self.home / "git" / "map-fix"
+        workspace.mkdir(parents=True)
+        db = self.home / ".gemini/antigravity-cli/conversation_summaries.db"
+        db.parent.mkdir(parents=True)
+        con = sqlite3.connect(db)
+        con.execute(
+            "create table conversation_summaries ("
+            "conversation_id text primary key, title text, preview text, "
+            "step_count integer, last_modified_time datetime, "
+            "workspace_uris text, status text, source text, project_id text, "
+            "agent_name text, parent_conversation_id text, nesting_depth integer, "
+            "killed numeric, last_user_input_time datetime, app_data_dir text)"
+        )
+        parent_id = "27a2cb3f-5a80-4b4a-b97c-740a72cc74c9"
+        preview_id = "7c1a2e2f-1b6d-48e3-82a3-368fd1c42573"
+        child_id = "63063499-ece1-4968-9176-774eb1730786"
+        rows = [
+            (parent_id, "Titled conversation", "Preview text", 42,
+             "2026-08-27 10:00:00.868523566+00:00",
+             json.dumps(["file://" + str(workspace)]), "", "", "proj",
+             "", "", 0, 0, "2026-08-27 09:00:00+00:00", "antigravity-cli"),
+            (preview_id, "", "Falls back to preview", 3,
+             "2026-08-26 10:00:00+00:00",
+             json.dumps(["file:///nonexistent/path"]), "", "", "proj",
+             "", "", 0, 0, "2026-08-26 09:00:00+00:00", "antigravity-cli"),
+            (child_id, "Delegated task", "Delegated", 5,
+             "2026-08-28 10:00:00+00:00",
+             json.dumps(["file://" + str(workspace)]), "", "", "proj",
+             "", parent_id, 1, 0, "2026-08-28 09:00:00+00:00", "antigravity-cli"),
+        ]
+        con.executemany(
+            "insert into conversation_summaries values "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        con.commit()
+        con.close()
+
+        found = list(SESSIONS.scan_agy())
+        self.assertEqual([row["id"] for row in found], [parent_id, preview_id])
+        by_id = {row["id"]: row for row in found}
+        self.assertEqual(by_id[parent_id]["title"], "Titled conversation")
+        self.assertEqual(by_id[parent_id]["dir"], str(workspace))
+        self.assertIn("42 steps", by_id[parent_id]["meta"])
+        self.assertGreater(by_id[parent_id]["mtime"], 0)
+        self.assertEqual(by_id[preview_id]["title"], "Falls back to preview")
+        self.assertEqual(by_id[preview_id]["dir"], str(self.home))
+
     def test_resume_targets_the_selected_sessions(self):
         old_find = SESSIONS.find
         old_open_terminal = SESSIONS.open_terminal
@@ -335,6 +382,7 @@ class ScannerTests(unittest.TestCase):
             SESSIONS.resume("opencode", "ses_selected")
             SESSIONS.resume("gemini", "88888888-8888-4888-8888-888888888888")
             SESSIONS.resume("grok", "dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+            SESSIONS.resume("agy", "27a2cb3f-5a80-4b4a-b97c-740a72cc74c9")
         finally:
             SESSIONS.find = old_find
             SESSIONS.open_terminal = old_open_terminal
@@ -347,6 +395,10 @@ class ScannerTests(unittest.TestCase):
         self.assertIn(
             "grok --resume 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'",
             commands[2],
+        )
+        self.assertIn(
+            "agy --conversation '27a2cb3f-5a80-4b4a-b97c-740a72cc74c9'",
+            commands[3],
         )
 
     def test_special_files_and_leaf_symlinks_are_never_opened(self):
