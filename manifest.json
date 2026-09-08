@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "sid.sessions",
   "name": "Session Browser",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "author": "Sudhanshu Gautam",
-  "description": "Browse previous sessions from every AI coding agent on this machine (Claude Code, Codex, opencode, Copilot, Pi, Gemini, Grok) and resume any of them in a terminal.",
+  "description": "Browse previous sessions from every AI coding agent on this machine (Claude Code, Codex, opencode, Copilot, Pi, Gemini, Grok, Antigravity) and resume any of them in a terminal.",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "BarWidget.qml"
