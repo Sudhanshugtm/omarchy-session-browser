@@ -136,7 +136,7 @@ class ScannerTests(unittest.TestCase):
         db.parent.mkdir(parents=True)
         con = sqlite3.connect(db)
         con.execute(
-            "create table session ("
+            "create table session_v2 ("
             "id text primary key, project_id text, workspace_id text, parent_id text, "
             "directory text, title text, time_updated integer, time_created integer, "
             "model text, agent text, cost real, tokens_input integer, "
@@ -146,10 +146,10 @@ class ScannerTests(unittest.TestCase):
             "ses_parent", "project", None, None, str(self.home), "Parent", 2000,
             1000, '{"id":"model"}', "build", 0.0, 10, 5, 0, "parent",
         )
-        con.execute("insert into session values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+        con.execute("insert into session_v2 values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
         child = list(row)
         child[0], child[3], child[5], child[6] = "ses_child", "ses_parent", "Child", 3000
-        con.execute("insert into session values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", child)
+        con.execute("insert into session_v2 values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", child)
         con.commit()
         con.close()
 
@@ -450,7 +450,7 @@ class ScannerTests(unittest.TestCase):
         database.unlink()
         con = sqlite3.connect(database)
         con.execute(
-            "create table session (id text, title text, directory text, "
+            "create table session_v2 (id text, title text, directory text, "
             "time_updated integer, time_created integer, model text, agent text, "
             "cost real, tokens_input integer, tokens_output integer, "
             "tokens_reasoning integer, slug text, parent_id text)"
@@ -465,16 +465,16 @@ class ScannerTests(unittest.TestCase):
         database = self.home / ".local/share/opencode/opencode.db"
         database.parent.mkdir(parents=True)
         con = sqlite3.connect(database)
-        con.execute("create table message (id text primary key, data text)")
+        con.execute("create table session_message (id text primary key, data text)")
         con.execute(
-            "create table part (session_id text, message_id text, "
+            "create table session_part (session_id text, message_id text, "
             "time_created integer, data text)"
         )
         for index in range(450):
             message_id = f"msg-{index}"
-            con.execute("insert into message values (?, ?)",
+            con.execute("insert into session_message values (?, ?)",
                         (message_id, json.dumps({"role": "assistant"})))
-            con.execute("insert into part values (?, ?, ?, ?)",
+            con.execute("insert into session_part values (?, ?, ?, ?)",
                         ("ses_bounded", message_id, index,
                          json.dumps({"type": "text", "text": "hello"})))
         con.commit()
