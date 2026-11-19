@@ -630,7 +630,7 @@ def scan_opencode(budget=None):
             " substr(directory, 1, 1024), time_updated, time_created,"
             " substr(model, 1, 4096), substr(agent, 1, 128), cost,"
             " tokens_input + tokens_output + tokens_reasoning, substr(slug, 1, 256)"
-            " from session where parent_id is null"
+            " from session_v2 where parent_id is null"
             " order by time_updated desc limit ?", (PER_AGENT_CAP,))
         rows = []
         for row in cursor:
@@ -1220,8 +1220,8 @@ def render_transcript(agent, sid, budget):
         if con is not None:
             try:
                 rows = con.execute(
-                    "select m.data, p.data from part p"
-                    " join message m on m.id = p.message_id"
+                    "select m.data, p.data from session_part p"
+                    " join session_message m on m.id = p.message_id"
                     " where p.session_id = ? and length(m.data) <= ?"
                     " and length(p.data) <= ? order by p.time_created limit 400",
                     (sid, SQLITE_FIELD_MAX, SQLITE_FIELD_MAX))
