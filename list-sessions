@@ -31,7 +31,7 @@ TITLE_MAX = 90
 CANDIDATE_CAP = 128
 MAX_PATHS = 1024
 MAX_OPEN_FILES = 768
-MAX_SCAN_BYTES = 64 * 1024 * 1024
+MAX_SCAN_BYTES = 128 * 1024 * 1024
 SCAN_SECONDS = 4.0
 JSON_FILE_MAX = 2 * 1024 * 1024
 JSONL_HEAD_MAX = 1024 * 1024
@@ -618,6 +618,14 @@ def scan_codex(budget=None):
                "size": info.st_size}
 
 
+def opencode_tables(con):
+    return {name for (name,) in con.execute(
+        "select name from sqlite_schema where type = 'table'"
+        " and name in ('session_v2', 'session', 'session_part',"
+        " 'session_message', 'part', 'message')"
+    )}
+
+
 def scan_opencode(budget=None):
     budget = ensure_budget(budget)
     db = HOME + "/.local/share/opencode/opencode.db"
@@ -625,12 +633,16 @@ def scan_opencode(budget=None):
     if con is None:
         return
     try:
+        tables = opencode_tables(con)
+        table = "session_v2" if "session_v2" in tables else "session"
+        if table not in tables:
+            return
         cursor = con.execute(
             "select substr(id, 1, 120), substr(title, 1, 1024),"
             " substr(directory, 1, 1024), time_updated, time_created,"
             " substr(model, 1, 4096), substr(agent, 1, 128), cost,"
             " tokens_input + tokens_output + tokens_reasoning, substr(slug, 1, 256)"
-            " from session where parent_id is null"
+            f" from {table} where parent_id is null"
             " order by time_updated desc limit ?", (PER_AGENT_CAP,))
         rows = []
         for row in cursor:
@@ -1178,6 +1190,50 @@ def peek_render(agent, sid):
         restore_deadline(deadline_state)
 
 
+def opencode_transcript_queries(tables, sid):
+    if "session_message" in tables:
+        # User text and assistant content can live inline. Split assistant
+        # parts precede any remaining inline content for the same message.
+        query = (
+            "select type, data, null as part, seq, null as ordinal"
+            " from session_message where session_id = ?"
+            " and type in ('user', 'assistant') and length(data) <= ?"
+        )
+        params = (sid, SQLITE_FIELD_MAX)
+        if "session_part" in tables:
+            query += (
+                " union all select m.type, null, p.data, m.seq, p.ordinal"
+                " from session_part p join session_message m on m.id = p.message_id"
+                " where p.session_id = ? and m.type = 'assistant'"
+                " and p.type = 'text' and length(p.data) <= ?"
+            )
+            params += (sid, SQLITE_FIELD_MAX)
+        yield ("select type, data, part from (" + query + ")"
+               " order by seq, ordinal is null, ordinal limit 400", params)
+    # An upgraded store can retain transcripts in the legacy tables.
+    if {"part", "message"} <= tables:
+        yield (
+            "select null, m.data, p.data from part p join message m on m.id = p.message_id"
+            " where p.session_id = ? and length(m.data) <= ?"
+            " and length(p.data) <= ? order by p.time_created limit 400",
+            (sid, SQLITE_FIELD_MAX, SQLITE_FIELD_MAX),
+        )
+
+
+def opencode_text_blocks(role, message, part):
+    if part is not None:
+        if role == "assistant" or (role is None and part.get("type") == "text"):
+            yield role or message.get("role", "assistant"), part.get("text", "")
+    elif role == "user":
+        yield role, message.get("text", "")
+    elif role == "assistant":
+        content = message.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    yield role, item.get("text", "")
+
+
 def render_transcript(agent, sid, budget):
     if agent == "claude":
         for path in session_files(agent, sid, budget)[:1]:
@@ -1219,27 +1275,28 @@ def render_transcript(agent, sid, budget):
         con = open_sqlite_readonly(db, budget)
         if con is not None:
             try:
-                rows = con.execute(
-                    "select m.data, p.data from part p"
-                    " join message m on m.id = p.message_id"
-                    " where p.session_id = ? and length(m.data) <= ?"
-                    " and length(p.data) <= ? order by p.time_created limit 400",
-                    (sid, SQLITE_FIELD_MAX, SQLITE_FIELD_MAX))
-                for mdata, pdata in rows:
-                    if _blocks_left[0] <= 0 or not budget.active():
+                for query, params in opencode_transcript_queries(opencode_tables(con), sid):
+                    rendered = False
+                    for role, mdata, pdata in con.execute(query, params):
+                        if _blocks_left[0] <= 0 or not budget.active():
+                            return
+                        row_bytes = sum(len(str(data).encode("utf-8", errors="replace"))
+                                        for data in (mdata, pdata) if data is not None)
+                        if budget.read_allowance(row_bytes) < row_bytes:
+                            return
+                        budget.account(row_bytes)
+                        message = parse_json_dict(mdata, budget) if mdata is not None else {}
+                        part = parse_json_dict(pdata, budget) if pdata is not None else None
+                        if message is None or (pdata is not None and part is None):
+                            continue
+                        for block_role, block_text in opencode_text_blocks(role, message, part):
+                            if _blocks_left[0] <= 0 or not budget.active():
+                                return
+                            if usable_text(block_text):
+                                render_block(block_role, block_text)
+                                rendered = True
+                    if rendered:
                         break
-                    row_bytes = len(str(mdata).encode("utf-8", errors="replace")) \
-                        + len(str(pdata).encode("utf-8", errors="replace"))
-                    if budget.read_allowance(row_bytes) < row_bytes:
-                        break
-                    budget.account(row_bytes)
-                    message = parse_json_dict(mdata, budget)
-                    part = parse_json_dict(pdata, budget)
-                    if message is None or part is None:
-                        continue
-                    role = message.get("role", "assistant")
-                    if part.get("type") == "text" and usable_text(part.get("text", "")):
-                        render_block(role, part["text"])
             except sqlite3.Error:
                 pass
             finally:

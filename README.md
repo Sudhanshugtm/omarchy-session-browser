@@ -35,14 +35,14 @@ unsandboxed).
   Explicit user forks remain visible.
 - **Hard bounds before parsing:** each provider considers at most 128 matching
   candidates and returns at most 50 sessions. A scan has cumulative ceilings
-  of 1,024 paths, 768 file opens, 64 MiB read, and four seconds. Regular files
+  of 1,024 paths, 768 file opens, 128 MiB read, and four seconds. Regular files
   are opened with no-follow/nonblocking flags and verified with `fstat`; FIFOs,
   devices, sockets, and leaf symlinks are skipped. JSON files are capped at
   2 MiB, JSONL title reads at 1 MiB per file, individual lines at 256 KiB,
   metadata passes at 2 MiB, and the opencode database at 512 MiB with bounded
   result fields, row counts, SQLite VM work, and a deadline progress handler.
   The database plus WAL/SHM footprint is conservatively charged in full to the
-  same 64 MiB cumulative allowance, and every auxiliary file receives the same
+  same 128 MiB cumulative allowance, and every auxiliary file receives the same
   regular-file check.
 - The helper caps its own JSON output at 900 KiB. Independently, the panel
   terminates collection after six seconds and rejects payloads over 1 MiB

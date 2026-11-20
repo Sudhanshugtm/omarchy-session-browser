@@ -131,12 +131,18 @@ class ScannerTests(unittest.TestCase):
         rows = list(SESSIONS.scan_claude())
         self.assertEqual([row["id"] for row in rows], [session_id])
 
-    def test_opencode_only_selects_rows_without_a_parent(self):
+    def test_opencode_legacy_only_selects_rows_without_a_parent(self):
+        self.check_opencode_root_sessions("session")
+
+    def test_opencode_v2_only_selects_rows_without_a_parent(self):
+        self.check_opencode_root_sessions("session_v2")
+
+    def check_opencode_root_sessions(self, table):
         db = self.home / ".local/share/opencode/opencode.db"
         db.parent.mkdir(parents=True)
         con = sqlite3.connect(db)
         con.execute(
-            "create table session ("
+            f"create table {table} ("
             "id text primary key, project_id text, workspace_id text, parent_id text, "
             "directory text, title text, time_updated integer, time_created integer, "
             "model text, agent text, cost real, tokens_input integer, "
@@ -146,10 +152,11 @@ class ScannerTests(unittest.TestCase):
             "ses_parent", "project", None, None, str(self.home), "Parent", 2000,
             1000, '{"id":"model"}', "build", 0.0, 10, 5, 0, "parent",
         )
-        con.execute("insert into session values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+        insert = f"insert into {table} values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        con.execute(insert, row)
         child = list(row)
         child[0], child[3], child[5], child[6] = "ses_child", "ses_parent", "Child", 3000
-        con.execute("insert into session values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", child)
+        con.execute(insert, child)
         con.commit()
         con.close()
 
@@ -497,6 +504,54 @@ class ScannerTests(unittest.TestCase):
             SESSIONS._blocks_left[0] = 400
 
         self.assertEqual(len(rendered), 400)
+
+    def test_opencode_v2_peek_handles_inline_split_and_unmigrated_transcripts(self):
+        database = self.home / ".local/share/opencode/opencode.db"
+        database.parent.mkdir(parents=True)
+        con = sqlite3.connect(database)
+        con.executescript(
+            "create table session_message (id text primary key, session_id text, "
+            "type text, seq integer, data text);"
+            "create table session_part (session_id text, message_id text, "
+            "ordinal integer, type text, data text);"
+            "create table message (id text primary key, data text);"
+            "create table part (session_id text, message_id text, "
+            "time_created integer, data text);"
+        )
+        con.executemany(
+            "insert into session_message values (?, ?, ?, ?, ?)",
+            [
+                ("reply", "ses_modern", "assistant", 2,
+                 json.dumps({"content": [{"type": "text", "text": "Inline reply"}]})),
+                ("prompt", "ses_modern", "user", 1, json.dumps({"text": "Prompt"})),
+            ],
+        )
+        con.executemany(
+            "insert into session_part values (?, ?, ?, ?, ?)",
+            [
+                ("ses_modern", "reply", 1, "text", json.dumps({"text": "Second split part"})),
+                ("ses_modern", "reply", 0, "text", json.dumps({"text": "First split part"})),
+            ],
+        )
+        con.execute("insert into message values (?, ?)", ("old", '{"role":"user"}'))
+        con.executemany(
+            "insert into part values (?, ?, ?, ?)",
+            [(sid, "old", 1, '{"type":"text","text":"Legacy prompt"}')
+             for sid in ("ses_modern", "ses_unmigrated")],
+        )
+        con.commit()
+        con.close()
+
+        with mock.patch.object(SESSIONS, "render_block") as render:
+            SESSIONS.render_transcript("opencode", "ses_modern", SESSIONS.ScanBudget())
+            self.assertEqual(
+                render.call_args_list,
+                [mock.call("user", "Prompt"), mock.call("assistant", "First split part"),
+                 mock.call("assistant", "Second split part"), mock.call("assistant", "Inline reply")],
+            )
+            render.reset_mock()
+            SESSIONS.render_transcript("opencode", "ses_unmigrated", SESSIONS.ScanBudget())
+            render.assert_called_once_with("user", "Legacy prompt")
 
     def test_peek_render_has_an_independent_hard_deadline(self):
         old_find = SESSIONS.find
